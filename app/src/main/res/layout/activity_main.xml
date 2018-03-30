@@ -24,4 +24,15 @@
         android:contentDescription="@string/camera_button"
         android:src="@mipmap/btn_camera" />
 
+    <ImageButton
+        android:id="@+id/cameraVideoButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentEnd="true"
+        android:layout_alignTop="@+id/cameraImageButton"
+        android:layout_marginEnd="56dp"
+        android:contentDescription="@string/camera_button"
+        android:src="@mipmap/btn_video_online" />
+
+
 </RelativeLayout>

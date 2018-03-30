@@ -1,7 +1,6 @@
 package com.example.mrneumann.vibcam
 
-import android.Manifest.permission.CAMERA
-import android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+import android.Manifest.permission.*
 import android.annotation.SuppressLint
 import android.support.v7.app.AppCompatActivity
 import android.os.Bundle
@@ -44,8 +43,8 @@ class MainActivity : AppCompatActivity() {
     //INIT
     private val TAG = "VibCam"
     private var PERMISSION_REQUEST = 0
-    private lateinit var mBackgroundHandlerThread: HandlerThread
-    private lateinit var mBackgroundHandler: Handler
+    private var mBackgroundHandlerThread: HandlerThread? = null
+    private var mBackgroundHandler: Handler? = null
     private lateinit var mCameraId: String
     private var mCameraDevice: CameraDevice? = null
     private lateinit var mMediaRecorder: MediaRecorder
@@ -80,23 +79,14 @@ class MainActivity : AppCompatActivity() {
             mMediaRecorder = MediaRecorder()
             if(mIsRecording){
                 try{
-//                    createVideoFileName()
+                    createVideoFileName()
                 } catch (e: IOException){
                     e.printStackTrace()
                 }
-//                     startRecord();
-//                mMediaRecorder.start();
-//                runOnUiThread(new Runnable() {
-//                    @Override
-//                    public void run() {
-//                        mChronometer.setBase(SystemClock.elapsedRealtime());
-//                        mChronometer.setVisibility(View.VISIBLE);
-//                        mChronometer.start();
-//                    }
-//                });
+                startRecord()
+                mMediaRecorder.start()
             } else {
                 startPreview()
-
             }
         }
 
@@ -124,12 +114,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
     private var mPreviewCaptureCallback = object:CameraCaptureSession.CaptureCallback(){
-        override fun onCaptureCompleted(session: CameraCaptureSession?, request: CaptureRequest?, result: TotalCaptureResult?) {
-            super.onCaptureCompleted(session, request, result)
-
+        private fun proc(result:CaptureResult){//надо ли разделять?
             if (mCaptureState == STATE_WAIT_LOCK) {
                 mCaptureState = STATE_PREVIEW
-                val afState:Int = result!!.get(CaptureResult.CONTROL_AF_STATE)
+                val afState:Int = result.get(CaptureResult.CONTROL_AF_STATE)
 
                 //зачем?
                 if(afState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED
@@ -138,14 +126,21 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+        override fun onCaptureCompleted(session: CameraCaptureSession?, request: CaptureRequest?, result: TotalCaptureResult?) {
+            super.onCaptureCompleted(session, request, result)
+            proc(result!!)
+        }
+
     }
     private var mRecordCaptureCallback = object :CameraCaptureSession.CaptureCallback(){
         override fun onCaptureCompleted(session: CameraCaptureSession?, request: CaptureRequest?, result: TotalCaptureResult?) {
             super.onCaptureCompleted(session, request, result)
-
+            proc(result!!)
+        }
+        private fun proc(result:CaptureResult){
             if(mCaptureState == STATE_WAIT_LOCK){
                 mCaptureState = STATE_PREVIEW
-                val afState:Int = result!!.get(CaptureResult.CONTROL_AF_STATE)
+                val afState:Int = result.get(CaptureResult.CONTROL_AF_STATE)
                 if(afState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED
                         || afState == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED){
                     startStillCaptureRequest()
@@ -155,7 +150,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val mOnImageAvailableListener = ImageReader.OnImageAvailableListener {
-        reader -> mBackgroundHandler.post(ImageSaver(reader.acquireLatestImage()))
+        reader -> mBackgroundHandler!!.post(ImageSaver(reader.acquireLatestImage()))
     }
 
     private inner class ImageSaver(private val mImage: Image): Runnable{
@@ -183,10 +178,8 @@ class MainActivity : AppCompatActivity() {
                         e.printStackTrace()
                     }
                 }
-
             }
         }
-
     }
 
     //OnCreate
@@ -202,9 +195,48 @@ class MainActivity : AppCompatActivity() {
         getPermission()
 
         cameraImageButton.setOnClickListener{
-            getPermission()
+            checkWriteStoragePermission()
             takeShot()
         }
+        cameraVideoButton.setOnClickListener{
+            if(mIsRecording){
+                mIsRecording = false
+                cameraVideoButton.setImageResource(R.mipmap.btn_video_online)
+
+                startPreview()
+                mMediaRecorder.stop()
+                mMediaRecorder.reset()
+
+                val mediaStoreUpdateIntent = Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE)
+                mediaStoreUpdateIntent.data = Uri.fromFile(File(mVideoFileName))
+                sendBroadcast(mediaStoreUpdateIntent)
+            }else{
+                mIsRecording = true
+                cameraVideoButton.setImageResource(R.mipmap.btn_video_busy)
+                checkWriteStoragePermission()
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+
+        createPhotoFolder()
+        createVideoFolder()
+
+        startBackgroundThread() //?
+        if (cameraWindow.isAvailable){
+            setupCamera(cameraWindow.width,cameraWindow.height)
+            connectCamera()
+        } else {
+            cameraWindow.surfaceTextureListener = mSurfaceTextureListener
+        }
+    }
+
+    override fun onPause() {
+        closeCamera()
+        stopBackgroundThread()
+        super.onPause()
     }
 
     private fun takeShot() {
@@ -217,6 +249,76 @@ class MainActivity : AppCompatActivity() {
                 mPreviewCaptureSession.capture(mCaptureRequestBuilder.build(), mPreviewCaptureCallback, mBackgroundHandler)
             }
         }catch (e:CameraAccessException){
+            e.printStackTrace()
+        }
+    }
+
+    private fun startRecord() = try {
+        if(mIsRecording) {
+            setupMediaRecorder()
+        }
+        val surfaceTexture:SurfaceTexture = cameraWindow.surfaceTexture
+        surfaceTexture.setDefaultBufferSize(mPreviewSize.width,mPreviewSize.height)
+        val previewSurface = Surface(surfaceTexture)
+        val recordSurface:Surface = mMediaRecorder.surface
+        mCaptureRequestBuilder = mCameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+        mCaptureRequestBuilder.addTarget(previewSurface)
+        mCaptureRequestBuilder.addTarget(recordSurface)
+
+        mCameraDevice!!.createCaptureSession(
+            Arrays.asList(previewSurface, recordSurface, mImageReader.surface),
+            object: CameraCaptureSession.StateCallback(){
+                override fun onConfigured(session: CameraCaptureSession) {
+                    mRecordCaptureSession = session
+                    try {
+                        mRecordCaptureSession.setRepeatingRequest(mCaptureRequestBuilder.build(),null,null)
+                    }catch (e:CameraAccessException){
+                        e.printStackTrace()
+                    }
+                }
+
+                override fun onConfigureFailed(session: CameraCaptureSession?) {
+                    Log.d(TAG,"onConfigureFailed: startRecord")
+                }
+            },
+            null)
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+
+    private fun checkWriteStoragePermission(){
+        getPermission()
+
+        try{
+            createVideoFileName()
+        }catch (e:IOException){
+            e.printStackTrace()
+        }
+
+        if(mIsRecording){
+            startRecord()
+            try{
+                mMediaRecorder.start()
+            }catch (e:Exception){
+                e.printStackTrace()
+            }
+        }
+    }
+
+    private fun setupMediaRecorder() {
+        try {
+            mMediaRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE)
+            mMediaRecorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            mMediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            mMediaRecorder.setOutputFile(mVideoFileName)
+            mMediaRecorder.setVideoEncodingBitRate(1000000)
+            mMediaRecorder.setVideoFrameRate(30)
+            mMediaRecorder.setVideoSize(mVideoSize.width, mVideoSize.height)
+            mMediaRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+            mMediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            mMediaRecorder.setOrientationHint(mTotalRotation)
+            mMediaRecorder.prepare()
+        }catch (e:Exception){
             e.printStackTrace()
         }
     }
@@ -251,7 +353,19 @@ class MainActivity : AppCompatActivity() {
             e.printStackTrace()
         }
     }
-
+    private fun closeCamera(){
+        if(mCameraDevice != null){
+            mCameraDevice!!.close()
+            mCameraDevice = null
+        }
+        //TODO доделать
+        mMediaRecorder.release()
+//
+//        if(mMediaRecorder){
+//            mMediaRecorder.release()
+//            //mMediaRecorder = null
+//        }
+    }
     @SuppressLint("SimpleDateFormat")
     @Throws(IOException::class)
     private fun createImageFileName():File {
@@ -278,7 +392,7 @@ class MainActivity : AppCompatActivity() {
 
         if(checkSelfPermission(this, WRITE_EXTERNAL_STORAGE) != PERMISSION_GRANTED) permissionToAccess.add(WRITE_EXTERNAL_STORAGE)
         if(checkSelfPermission(this, CAMERA) != PERMISSION_GRANTED) permissionToAccess.add(CAMERA)
-        //mic
+        if(checkSelfPermission(this, RECORD_AUDIO) != PERMISSION_GRANTED) permissionToAccess.add(RECORD_AUDIO)
 
         if(permissionToAccess.isNotEmpty()) {
             requestPermissions(this, permissionToAccess.toTypedArray(), PERMISSION_REQUEST)
@@ -298,23 +412,6 @@ class MainActivity : AppCompatActivity() {
             mVideoFolder.mkdirs()
         }
     }
-
-    override fun onResume() {
-        super.onResume()
-
-        createPhotoFolder()
-        createVideoFolder()
-
-        startBackgroundThread() //?
-        if (cameraWindow.isAvailable){
-            setupCamera(cameraWindow.width,cameraWindow.height)
-            connectCamera()
-        } else {
-            cameraWindow.surfaceTextureListener = mSurfaceTextureListener
-        }
-
-    }
-
 
     private fun setupCamera(width: Int, height: Int) {
         val cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -396,8 +493,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun startBackgroundThread() {
         mBackgroundHandlerThread = HandlerThread("VibCam")
-        mBackgroundHandlerThread.start()
-        mBackgroundHandler = Handler(mBackgroundHandlerThread.looper)
+        mBackgroundHandlerThread!!.start()
+        mBackgroundHandler = Handler(mBackgroundHandlerThread!!.looper)
+    }
+    private fun stopBackgroundThread(){
+        mBackgroundHandlerThread?.quitSafely()
+        try {
+            mBackgroundHandlerThread!!.join()
+            mBackgroundHandlerThread = null
+            mBackgroundHandler = null
+        }catch (e:InterruptedException){
+            e.printStackTrace()
+        }
     }
 
     private fun chooseOptimalSize(choices: Array<out Size>, width: Int, height: Int): Size {
@@ -446,5 +553,4 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
-
 }
